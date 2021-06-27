@@ -479,7 +479,7 @@ def main(dest, old=None, source=None, overwrite=False, manual=False, chat=None):
     Read the Signal directory and output attachments and chat files to DEST directory.
     Assumes the following default directories, can be overridden wtih --source.
 
-    Deafault for DEST is a sub-directory output/ in the current directory.
+    Default for DEST is a sub-directory output/ in the current directory.
 
     \b
     Default Signal directories:
