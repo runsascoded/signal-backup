@@ -7,11 +7,15 @@ import shutil
 from pathlib import Path
 from datetime import datetime
 import re
+import sqlite3
 
 import click
 from pysqlcipher3 import dbapi2 as sqlcipher
 import markdown
 from bs4 import BeautifulSoup
+
+
+log = False
 
 
 def source_location():
@@ -39,6 +43,8 @@ def copy_attachments(src, dest, conversations, contacts):
 
     for key, messages in conversations.items():
         name = contacts[key]["name"]
+        if log:
+            print(f"\tCopying attachments for: {name}")
         # some contact names are None
         if name is None:
             name = "None"
@@ -51,24 +57,33 @@ def copy_attachments(src, dest, conversations, contacts):
                     date = datetime.fromtimestamp(msg["timestamp"] / 1000.0).strftime(
                         "%Y-%m-%d"
                     )
-                    for att in attachments:
+                    for i, att in enumerate(attachments):
                         try:
-                            att["fileName"] = f"{date}_{att['fileName']}".replace(
+                            att[
+                                "fileName"
+                            ] = f"{date}_{i:02}_{att['fileName']}".replace(
                                 " ", "_"
-                            ).replace("/", "-")
+                            ).replace(
+                                "/", "-"
+                            )
                             # account for erroneous backslash in path
                             att_path = str(att["path"]).replace("\\", "/")
                             shutil.copy2(
                                 src_att / att_path, contact_path / att["fileName"]
                             )
                         except KeyError:
-                            print(f"Broken attachment:\t{name}\t{att['fileName']}")
+                            if log:
+                                print(
+                                    f"\t\tBroken attachment:\t{name}\t{att['fileName']}"
+                                )
                         except FileNotFoundError:
-                            print(f"Attachment not found:\t{name}\t{att['fileName']}")
+                            if log:
+                                print(
+                                    f"\t\tAttachment not found:\t{name} {att['fileName']}"
+                                )
             except KeyError:
-                print(f"No attachments for a message: {name}")
-
-    return conversations
+                if log:
+                    print(f"\t\tNo attachments for a message: {name}")
 
 
 def make_simple(dest, conversations, contacts):
@@ -77,6 +92,8 @@ def make_simple(dest, conversations, contacts):
     dest = Path(dest)
     for key, messages in conversations.items():
         name = contacts[key]["name"]
+        if log:
+            print(f"\tDoing markdown for: {name}")
         is_group = contacts[key]["is_group"]
         # some contact names are None
         if name is None:
@@ -84,27 +101,38 @@ def make_simple(dest, conversations, contacts):
         mdfile = open(dest / name / "index.md", "a")
 
         for msg in messages:
-            try:
-                timestamp = msg["timestamp"]
-            except KeyError:
-                timestamp = msg["sent_at"]
-                print("No timestamp; use sent_at")
+            timestamp = (
+                msg["timestamp"]
+                if "timestamp" in msg
+                else msg["sent_at"]
+                if "sent_at" in msg
+                else None
+            )
+
             if timestamp is None:
+                if log:
+                    print("\t\tNo timestamp or sent_at; date set to 1970")
                 date = "1970-01-01 00:00"
             else:
                 date = datetime.fromtimestamp(timestamp / 1000.0).strftime(
                     "%Y-%m-%d %H:%M"
                 )
+
+            if log:
+                print(f"\t\tDoing {name}, msg: {date}")
+
             try:
                 body = msg["body"]
             except KeyError:
-                print(f"No body:\t\t{date}")
+                if log:
+                    print(f"\t\tNo body:\t\t{date}")
                 body = ""
             if body is None:
                 body = ""
             body = body.replace("`", "")  # stop md code sections forming
             body += "  "  # so that markdown newlines
 
+            sender = "No-Sender"
             if "type" in msg.keys() and msg["type"] == "outgoing":
                 sender = "Me"
             else:
@@ -117,8 +145,8 @@ def make_simple(dest, conversations, contacts):
                     else:
                         sender = contacts[msg["conversationId"]]["name"]
                 except KeyError:
-                    print(f"No sender:\t\t{date}")
-                    sender = "No-Sender"
+                    if log:
+                        print(f"\t\tNo sender:\t\t{date}")
 
             try:
                 attachments = msg["attachments"]
@@ -141,10 +169,11 @@ def make_simple(dest, conversations, contacts):
                     body += f"[{file_name}](./{path})  "
                 print(f"[{date}] {sender}: {body}", file=mdfile)
             except KeyError:
-                print(f"No attachments for a message: {name}")
+                if log:
+                    print(f"\t\tNo attachments for a message: {name}, {date}")
 
 
-def fetch_data(db_file, key, manual=False, chat=None):
+def fetch_data(db_file, key, manual=False, chats=None):
     """Load SQLite data into dicts."""
 
     contacts = {}
@@ -158,6 +187,8 @@ def fetch_data(db_file, key, manual=False, chat=None):
 
     db_file_decrypted = db_file.parents[0] / "db-decrypt.sqlite"
     if manual:
+        if log:
+            print(f"Manually decrypting db to {db_file_decrypted}")
         if db_file_decrypted.exists():
             db_file_decrypted.unlink()
         command = (
@@ -169,7 +200,8 @@ def fetch_data(db_file, key, manual=False, chat=None):
             f'" | sqlcipher {db_file}'
         )
         os.system(command)
-        db = sqlcipher.connect(str(db_file_decrypted))
+        # use sqlite instead of sqlcipher as DB already decrypted
+        db = sqlite3.connect(str(db_file_decrypted))
         c = db.cursor()
         c2 = db.cursor()
     else:
@@ -185,11 +217,13 @@ def fetch_data(db_file, key, manual=False, chat=None):
             cursor.execute("PRAGMA cipher_kdf_algorithm = PBKDF2_HMAC_SHA512")
 
     query = "SELECT type, id, e164, name, profileName, members FROM conversations"
-    if chat is not None:
-        chat = '","'.join(chat)
-        query = query + f' WHERE name IN ("{chat}") OR profileName IN ("{chat}")'
+    if chats is not None:
+        chats = '","'.join(chats)
+        query = query + f' WHERE name IN ("{chats}") OR profileName IN ("{chats}")'
     c.execute(query)
     for result in c:
+        if log:
+            print(f"\tLoading SQL results for: {result[3]}")
         is_group = result[0] == "group"
         cid = result[1]
         contacts[cid] = {
@@ -207,7 +241,8 @@ def fetch_data(db_file, key, manual=False, chat=None):
             usable_members = []
             # Match group members from phone number to name
             if result[5] is None:
-                print("Empty group.")
+                if log:
+                    print("\tEmpty group.")
             else:
                 for member in result[5].split():
                     c2.execute(
@@ -259,7 +294,8 @@ def create_html(dest, msgs_per_page=100):
     for sub in dest.iterdir():
         if sub.is_dir():
             name = sub.stem
-            print(f"Doing html for {name}")
+            if log:
+                print(f"\tDoing html for {name}")
             path = sub / "index.md"
             # touch first
             open(path, "a")
@@ -317,17 +353,19 @@ def create_html(dest, msgs_per_page=100):
                 soup = BeautifulSoup(body, "html.parser")
                 imgs = soup.find_all("img")
                 for im in imgs:
-                    alt = im["alt"]
-                    src = im["src"]
-                    temp = BeautifulSoup(figure_template, "html.parser")
-                    temp.figure.label["for"] = alt
-                    temp.figure.label.img["src"] = src
-                    temp.figure.label.img["alt"] = alt
-                    temp.figure.input["id"] = alt
-                    temp.figure.div.label["for"] = alt
-                    temp.figure.div.label.div.img["src"] = src
-                    temp.figure.div.label.div.img["alt"] = alt
-                    im.replace_with(temp)
+                    if im.get("src"):
+                        temp = BeautifulSoup(figure_template, "html.parser")
+                        src = im["src"]
+                        temp.figure.div.label.div.img["src"] = src
+                        temp.figure.label.img["src"] = src
+
+                        alt = im["alt"]
+                        temp.figure.label["for"] = alt
+                        temp.figure.label.img["alt"] = alt
+                        temp.figure.input["id"] = alt
+                        temp.figure.div.label["for"] = alt
+                        temp.figure.div.label.div.img["alt"] = alt
+                        im.replace_with(temp)
 
                 # voice notes
                 voices = soup.select(r"a[href*=\.m4a]")
@@ -417,13 +455,17 @@ def merge_chat(path_new, path_old):
         new = f.readlines()
 
     try:
-        print(f"First line old:\t{old[0][:30]}")
-        print(f"Last line old:\t{old[-1][:30]}")
-        print(f"First line new:\t{new[0][:30]}")
-        print(f"Last line new:\t{new[-1][:30]}")
+        a, b, c, d = old[0][:30], old[-1][:30], new[0][:30], new[-1][:30]
+        if log:
+            print(f"\t\tFirst line old:\t{a}")
+            print(f"\t\tLast line old:\t{b}")
+            print(f"\t\tFirst line new:\t{c}")
+            print(f"\t\tLast line new:\t{d}")
     except IndexError:
-        print("No new messages for this conversation")
+        if log:
+            print("\t\tNo new messages for this conversation")
         return
+
     old = lines_to_msgs(old)
     new = lines_to_msgs(new)
 
@@ -436,13 +478,11 @@ def merge_chat(path_new, path_old):
 
 
 def merge_with_old(dest, old):
-    print("Going to merge output with old export at:")
-    print(old)
-    print("No existing files will be deleted or overwritten")
     for sub in dest.iterdir():
         if sub.is_dir():
             name = sub.stem
-            print(f"Merging {name}")
+            if log:
+                print(f"\tMerging {name}")
             dir_old = old / name
             if dir_old.is_dir():
                 merge_attachments(sub / "media", dir_old / "media")
@@ -451,19 +491,33 @@ def merge_with_old(dest, old):
                 try:
                     merge_chat(path_new, path_old)
                 except FileNotFoundError:
-                    print(f"No old for {name}")
+                    if log:
+                        print(f"\tNo old for {name}")
                 print()
 
 
 @click.command()
-@click.argument("dest", type=click.Path())
+@click.argument("dest", type=click.Path(), default="output")
 @click.option(
     "--source", "-s", type=click.Path(), help="Path to Signal source and database"
 )
 @click.option(
-    "--chat",
+    "--chats",
     "-c",
     help="Comma-separated chat names to include. These are contact names or group names",
+)
+@click.option(
+    "--paginate",
+    "-p",
+    type=click.INT,
+    default=100,
+    help="Number of messages per page in the HTML output. Set to 0 for no pagination. Defaults to 100.",
+)
+@click.option(
+    "--list-chats",
+    is_flag=True,
+    default=False,
+    help="List all available chats/conversations and then quit",
 )
 @click.option("--old", type=click.Path(), help="Path to previous export to merge with")
 @click.option(
@@ -474,13 +528,30 @@ def merge_with_old(dest, old):
     help="Flag to overwrite existing output",
 )
 @click.option(
+    "--verbose",
+    "-v",
+    is_flag=True,
+    default=False,
+    help="Enable verbose output logging",
+)
+@click.option(
     "--manual",
     "-m",
     is_flag=True,
     default=False,
     help="Whether to manually decrypt the db",
 )
-def main(dest, old=None, source=None, overwrite=False, manual=False, chat=None):
+def main(
+    dest,
+    old=None,
+    source=None,
+    overwrite=False,
+    verbose=False,
+    manual=False,
+    chats=None,
+    paginate=None,
+    list_chats=None,
+):
     """
     Read the Signal directory and output attachments and chat files to DEST directory.
     Assumes the following default directories, can be overridden wtih --source.
@@ -494,6 +565,9 @@ def main(dest, old=None, source=None, overwrite=False, manual=False, chat=None):
      - Windows: ~/AppData/Roaming/Signal
     """
 
+    global log
+    log = verbose
+
     if source:
         src = Path(source)
     else:
@@ -501,19 +575,8 @@ def main(dest, old=None, source=None, overwrite=False, manual=False, chat=None):
     source = src / "config.json"
     db_file = src / "sql" / "db.sqlite"
 
-    if chat:
-        chat = chat.split(",")
-
-    dest = Path(dest).expanduser()
-    if not dest.is_dir():
-        dest.mkdir(parents=True)
-    elif overwrite:
-        shutil.rmtree(dest)
-        dest.mkdir(parents=True)
-    else:
-        print("Output folder already exists, didn't do anything!")
-        print("Use --overwrite to ignore existing directory.")
-        sys.exit(1)
+    if chats:
+        chats = chats.split(",")
 
     # Read sqlcipher key from Signal config file
     if source.is_file():
@@ -523,15 +586,41 @@ def main(dest, old=None, source=None, overwrite=False, manual=False, chat=None):
         print(f"Error: {source} not found in directory {src}")
         sys.exit(1)
 
-    convos, contacts = fetch_data(db_file, key, manual=manual, chat=chat)
+    if log:
+        print(f"\nFetching data from {db_file}\n")
+    convos, contacts = fetch_data(db_file, key, manual=manual, chats=chats)
+
+    if list_chats:
+        names = sorted(v["name"] for v in contacts.values() if v["name"] is not None)
+        print("\n".join(names))
+        sys.exit()
+
+    dest = Path(dest).expanduser()
+    if not dest.is_dir():
+        dest.mkdir(parents=True)
+    elif overwrite:
+        shutil.rmtree(dest)
+        dest.mkdir(parents=True)
+    else:
+        print(f"Output folder '{dest}' already exists, didn't do anything!")
+        print("Use --overwrite to ignore existing directory.")
+        sys.exit(1)
+
     contacts = fix_names(contacts)
-    convos = copy_attachments(src, dest, convos, contacts)
+    print("\nCopying and renaming attachments")
+    copy_attachments(src, dest, convos, contacts)
+    print("\nCreating markdown files")
     make_simple(dest, convos, contacts)
     if old:
+        print(f"\nMerging old at {old} into output directory")
+        print("No existing files will be deleted or overwritten!")
         merge_with_old(dest, Path(old))
-    create_html(dest)
+    print("\nCreating HTML files")
+    if paginate <= 0:
+        paginate = int(1e20)
+    create_html(dest, msgs_per_page=paginate)
 
-    print(f"\nDone! Files exported to {dest}.")
+    print(f"\nDone! Files exported to {dest}.\n")
 
 
 if __name__ == "__main__":
