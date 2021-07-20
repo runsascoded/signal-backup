@@ -150,6 +150,12 @@ def fetch_data(db_file, key, manual=False, chat=None):
     contacts = {}
     convos = {}
 
+# PRAGMA key = "x'key'";
+# PRAGMA cipher_page_size = 4096;
+# PRAGMA kdf_iter = 64000;
+# PRAGMA cipher_hmac_algorithm = HMAC_SHA512;
+# PRAGMA cipher_kdf_algorithm = PBKDF2_HMAC_SHA512;
+
     db_file_decrypted = db_file.parents[0] / "db-decrypt.sqlite"
     if manual:
         if db_file_decrypted.exists():

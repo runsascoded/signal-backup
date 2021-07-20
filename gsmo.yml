@@ -1,0 +1,4 @@
+sudo: true
+apt: libsqlcipher-dev
+mount: /Users/ryan/Library/Application Support/Signal:/signal
+
